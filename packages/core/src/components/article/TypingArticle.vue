@@ -17,7 +17,9 @@ import ContextMenu from '@imengyu/vue3-context-menu'
 import '@imengyu/vue3-context-menu/lib/vue3-context-menu.css'
 import nlp from 'compromise/three'
 import { nanoid } from 'nanoid'
-import { inject, onMounted, onUnmounted, watch } from 'vue'
+import { inject, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useArticleWordLookup, type AnchorRect } from '../../hooks/useArticleWordLookup'
+import WordDefinePopover from './WordDefinePopover.vue'
 
 import { usePracticeArticlePersistence } from '../../composables/usePracticePersistence'
 import { PracticeArticleWordType, ShortcutKey } from '../../types'
@@ -660,6 +662,51 @@ function onContextMenu(e: MouseEvent, sentence: Sentence, i, j, w) {
   })
 }
 
+// ============== 点击文章单词弹出查词卡 (click-to-define) ==============
+// 从当前 store 拿语言（不再用 prop，避免破坏 unplugin-vue-better-define 对 defineProps 的解析）
+const articleLang = (useBaseStore() as any)?.sbook?.language || (useBaseStore() as any)?.sdict?.language
+const { getWord, getWordAsync, ensureGlobalIndex } = useArticleWordLookup(props.article, articleLang)
+const defineWord = ref<Word | null>(null)
+const defineQueryText = ref<string>('')
+const defineAnchor = ref<AnchorRect | null>(null)
+const defineVisible = ref(false)
+
+async function resolveWordAsync(text: string): Promise<Word | null> {
+  try {
+    const w = await getWordAsync(text)
+    const hasTrans = Array.isArray(w.trans) && w.trans.length > 0
+    const hasPhonetic = !!(w.phonetic0 || w.phonetic1)
+    if (!hasTrans && !hasPhonetic) return null
+    return w
+  } catch {
+    return null
+  }
+}
+
+function openDefine(e: MouseEvent, word: ArticleWord) {
+  // 仅真实单词响应（标点/数字不弹）
+  if (word.type !== PracticeArticleWordType.Word) return
+  // 阻止冒泡到 document mousedown 监听，避免外部点击关闭逻辑误关
+  e.stopPropagation()
+  const t = e.currentTarget as HTMLElement
+  const r = t.getBoundingClientRect()
+  defineQueryText.value = word.word
+  defineWord.value = getWord(word.word)
+  defineAnchor.value = {
+    top: r.top,
+    left: r.left,
+    width: r.width,
+    height: r.height,
+    bottom: r.bottom,
+    right: r.right,
+  }
+  defineVisible.value = true
+}
+
+function closeDefine() {
+  defineVisible.value = false
+}
+
 onMounted(() => {
   emitter.on(EventKey.resetWord, () => {
     wrong = input = ''
@@ -668,6 +715,8 @@ onMounted(() => {
   if (isMob) {
     focusMobileInput()
   }
+  // 进入文章页就预热本地英文词典，用户点单词时大概率已就绪
+  ensureGlobalIndex()
 })
 
 onUnmounted(() => {
@@ -778,7 +827,7 @@ const currentPractice = inject('currentPractice', [])
                     'hover-show',
                   word.type === PracticeArticleWordType.Number && 'font-family text-xl',
                 ]"
-                @click="playWordAudio(word.word)"
+                @click.stop="openDefine($event, word)"
               >
                 <TypingWord :word="word" :is-typing="true" v-if="isCurrent(indexI, indexJ, indexW) && !isSpace" />
                 <TypingWord :word="word" :is-typing="false" v-else />
@@ -815,10 +864,20 @@ const currentPractice = inject('currentPractice', [])
           </div>
         </template>
       </div>
-      <div class="cursor" v-if="!isEnd" :style="{ top: cursor.top + 'px', left: cursor.left + 'px' }"></div>
-    </div>
+        <div class="cursor" v-if="!isEnd" :style="{ top: cursor.top + 'px', left: cursor.left + 'px' }"></div>
+      </div>
 
-    <div class="options flex justify-center" v-if="isEnd">
+      <!-- 查词卡弹层: 点击文章单词时弹出, 跟随单词定位 -->
+      <WordDefinePopover
+        v-show="defineVisible"
+        :word="defineWord"
+        :anchor="defineAnchor"
+        :query-text="defineQueryText"
+        :resolve-async="resolveWordAsync"
+        @close="closeDefine"
+      />
+
+      <div class="options flex justify-center" v-if="isEnd">
       <BaseButton @click="emit('replay')">{{ $t('restart_practice') }} </BaseButton>
       <BaseButton v-if="store.sbook.lastLearnIndex < store.sbook.articles.length - 1" @click="emit('next')"
         >{{ $t('next_article') }}
