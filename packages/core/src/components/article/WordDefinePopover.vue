@@ -120,25 +120,50 @@ watch(
   { immediate: true }
 )
 
+// 点弹层外（空白/文章/其他元素）关闭。两个时机都监听，互为兜底：
+// - mousedown(capture)：最早触发，键盘/输入法等场景下最可靠
+// - click(冒泡)：触屏、以及 mousedown 被别的组件拦掉时兜底
+//   注意：弹层自身 wrapper 有 @click.stop、文章单词用 @click.stop，
+//   所以这两处的 click 都不会冒泡到这里，不会误关。
 function onDocMouseDown(e: MouseEvent) {
+  const t = e.target as Node | null
+  if (tipEl.value && t && !tipEl.value.contains(t)) emit('close')
+}
+function onDocClick(e: MouseEvent) {
   const t = e.target as Node | null
   if (tipEl.value && t && !tipEl.value.contains(t)) emit('close')
 }
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') emit('close')
 }
-function onScrollOrResize() {
+function onScrollOrResize(e: Event) {
+  // 弹层内部（.wdp-body）的滚动不算"外部滚动"，不关闭；
+  // 只有页面/窗口级滚动（卡片已脱离单词）才关闭。
+  const t = e.target as Node | null
+  if (t && tipEl.value && tipEl.value.contains(t)) return
   emit('close')
+}
+
+// wrapper 兜底：即使 .wdp-close 自己的 @click 因为布局/层级原因没触发，
+// 在 wrapper 这一层捕获到 × 的点击也照样关闭。
+function onPopoverClick(e: MouseEvent) {
+  const t = e.target as HTMLElement | null
+  if (!t) return
+  if (t.classList?.contains('wdp-close') || t.closest?.('.wdp-close')) {
+    emit('close')
+  }
 }
 
 onMounted(() => {
   document.addEventListener('mousedown', onDocMouseDown, true)
+  document.addEventListener('click', onDocClick)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('resize', onScrollOrResize)
   window.addEventListener('scroll', onScrollOrResize, true)
 })
 onUnmounted(() => {
   document.removeEventListener('mousedown', onDocMouseDown, true)
+  document.removeEventListener('click', onDocClick)
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('resize', onScrollOrResize)
   window.removeEventListener('scroll', onScrollOrResize, true)
@@ -153,7 +178,7 @@ onUnmounted(() => {
       class="word-define-popover"
       :style="{ top: pos.top + 'px', left: pos.left + 'px' }"
       :data-placement="pos.placement"
-      @click.stop
+      @click.stop="onPopoverClick"
       @mousedown.stop
       @contextmenu.prevent
     >
@@ -162,13 +187,17 @@ onUnmounted(() => {
         class="wdp-close"
         :title="'关闭'"
         aria-label="close"
+        @mousedown="emit('close')"
         @click="emit('close')"
       >×</button>
       <span v-if="asyncLoading" class="wdp-loading" title="正在补全释义…">⏳</span>
-      <div v-if="baseHint" class="wdp-base">
-        {{ queryText }} <span class="wdp-arrow">→</span> 原形 <b>{{ baseHint }}</b>
+      <!-- 内容/滚动层放在 × 之外：滚动条出现时不会遮住关闭按钮的点击区域 -->
+      <div class="wdp-body">
+        <div v-if="baseHint" class="wdp-base">
+          {{ queryText }} <span class="wdp-arrow">→</span> 原形 <b>{{ baseHint }}</b>
+        </div>
+        <WordItem :item="internalWord" :show-mark-icon="false" />
       </div>
-      <WordItem :item="internalWord" :show-mark-icon="false" />
     </div>
   </Teleport>
 </template>
@@ -176,19 +205,11 @@ onUnmounted(() => {
 <style scoped lang="scss">
 .word-define-popover {
   position: fixed;
-  z-index: 9999;
-  background: var(--color-tooltip-bg);
-  color: inherit;
-  border-radius: 0.5rem;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
-  padding: 0.55rem 0.9rem 0.7rem;
+  // 提到极高层级，压过页面任何可能的浮层（toast/modal/引导层），确保 × 一定在最上层可点
+  z-index: 100000;
   // 窄屏下用视口宽度兜底，避免固定 18rem/30rem 在手机上溢出
   min-width: min(18rem, 92vw);
   max-width: min(30rem, 92vw);
-  // 释义/例句较长时限制高度并允许内部滚动，避免手机上底部被裁切
-  max-height: calc(100vh - 1rem);
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
   animation: wdp-pop 0.12s ease-out;
 
   &::after {
@@ -213,12 +234,29 @@ onUnmounted(() => {
   }
 }
 
+// 内容 + 滚动层：× 按钮和加载动画在它外面（wrapper 里），滚动条出现时不会遮住关闭按钮
+.wdp-body {
+  background: var(--color-tooltip-bg);
+  color: inherit;
+  border-radius: 0.5rem;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+  padding: 0.55rem 0.9rem 0.7rem;
+  // 右上角给 × 让出空间，避免遮住 WordItem 的收藏/喇叭图标
+  padding-right: calc(0.9rem + 1.8rem);
+  // 释义/例句较长时限制高度并允许内部滚动，避免手机上底部被裁切
+  max-height: calc(100vh - 1rem);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .wdp-close {
   position: absolute;
-  top: 0.2rem;
-  right: 0.3rem;
-  width: 1.5rem;
-  height: 1.5rem;
+  top: 0.15rem;
+  right: 0.25rem;
+  width: 1.85rem;
+  height: 1.85rem;
+  // 在 wrapper 堆叠上下文内显式置顶，确保始终盖在内容层之上、可被点击
+  z-index: 10;
   display: inline-flex;
   align-items: center;
   justify-content: center;
